@@ -1,74 +1,115 @@
-OPENROUTER = [
+import random
+
+AIML_KEYS = [
+    "REMOVED_SECRET",
+    "REMOVED_SECRET",
     "REMOVED_SECRET",
     "REMOVED_SECRET",
     "REMOVED_SECRET"
 ]
 
+def get_random_key():
+    return random.choice(AIML_KEYS)
+
 def encode_image_to_base64(image_path):
     import base64
     with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode('utf-8')
+        return base64.b64encode(image_file.read()).decode("utf-8")
 
-
-def ask_openrouter():
+def ask_aimlapi():
     from openai import OpenAI
     import requests
 
     client = OpenAI(
-        api_key=OPENROUTER[0],
-        base_url="https://openrouter.ai/api/v1"
+        api_key=get_random_key(),
+        base_url="https://api.aimlapi.com/v1",
     )
-    model = 'gpt-5'
+
+    model = "gpt-4o"
 
     messages = [
-        {"role": "system", "content": "ты очень хороший помошник, который выполняет важную задачу: решает задачи по олимпиадному программированию. тебе отправляют условия задачи, а твоя задача - написаь код - решение задачи. максимально эффективный и правильный. Выложись на максимум, за свою работу ту получищь много долларов"}
+        {
+            "role": "system",
+            "content": (
+                "Ты отличный помощник по олимпиадному программированию. "
+                "Ты получаешь условие задачи и даёшь максимально оптимальное решение на Python. "
+                "Отдавай полный код."
+            )
+        }
     ]
+
     while True:
         users_request = input("> ")
         if users_request == "exit":
             break
 
-        if 'img' in users_request:
+        if "img" in users_request:
             try:
-                filename, caption = users_request.split('-')[1:]
-                url = "https://openrouter.ai/api/v1/chat/completions"
+                filename, caption = users_request.split("-")[1:]
+                base64_data = encode_image_to_base64(filename)
+
+                api_key = get_random_key()
+
+                url = "https://api.aimlapi.com/v1/chat/completions"
                 headers = {
-                    "Authorization": f"Bearer {OPENROUTER[0]}",
+                    "Authorization": f"Bearer {api_key}",
                     "Content-Type": "application/json"
                 }
-                data_url = f"data:image/jpeg;base64,{encode_image_to_base64(filename)}"
-                messages.append({"role": "user",
-                                "content": [
-                                    { "type": "text", "text": caption },
-                                    { "type": "image_url", "image_url": {"url": data_url} }
-                                ]})
-                payload = {"model": "google/gemini-2.0-flash-001", "messages": messages}
+
+                payload = {
+                    "model": "gpt-4o",
+                    "messages": [
+                        *messages,
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": caption},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{base64_data}"
+                                    }
+                                }
+                            ]
+                        }
+                    ]
+                }
+
                 response = requests.post(url, headers=headers, json=payload)
-                response_data = response.json()
-                response_text = response_data['choices'][0]['message']['content']
+                r = response.json()
+                response_text = r["choices"][0]["message"]["content"]
                 print(response_text)
-                messages.append({'role': 'assistant', 'content': response_text})
+
+                messages.append({"role": "assistant", "content": response_text})
+
             except Exception as e:
-                print(e)
+                print("Image error:", e)
+
         else:
             try:
-                if users_request == 'f':
-                    f = open('data.txt', 'w')
-                    users_request = f.read()
-                    f.close()
-                messages.append(
-                    {"role": "user", "content": users_request}
+                if users_request == "f":
+                    with open("data.txt", "r") as f:
+                        users_request = f.read()
+
+                messages.append({"role": "user", "content": users_request})
+
+                client = OpenAI(
+                    api_key=get_random_key(),
+                    base_url="https://api.aimlapi.com/v1",
                 )
+
                 completion = client.chat.completions.create(
                     model=model,
                     messages=messages,
                 )
+
                 response_text = completion.choices[0].message.content
                 print(response_text)
+
                 if response_text:
-                    messages.append({'role': 'assistant', 'content': response_text})
+                    messages.append({"role": "assistant", "content": response_text})
+
             except Exception as e:
-                print(e)
+                print("Error:", e)
 
-
-ask_openrouter()
+ask_aimlapi()
