@@ -1,118 +1,93 @@
+from flask import Flask, request, jsonify, make_response
 import google.generativeai as genai
-import os
-
+import uuid
 from config import GEMINI_API_KEY
 
+app = Flask(__name__)
 
-def query_gemini_model(prompt_text: str, api_key: str, model_name: str = "gemini-1.5-pro-latest") -> str:
+genai.configure(api_key=GEMINI_API_KEY)
+
+MODEL_NAME = "gemini-3-pro-preview"
+
+
+chat_sessions = {}
+
+
+@app.errorhandler(Exception)
+def handle_exception(e):
     """
-    Отправляет текстовый запрос к модели Gemini и возвращает ответ.
-
-    Args:
-        prompt_text (str): Текст вашего запроса.
-        api_key (str): Ваш API ключ Google AI.
-        model_name (str): Название модели (например, 'gemini-1.5-pro').
-                          Если выйдет 3 версия, замените на 'gemini-3.0-pro-preview'.
-
-    Returns:
-        str: Текст ответа от нейросети.
+    Перехватывает любые ошибки сервера и возвращает их в JSON формате.
     """
+    app.logger.error(f"Server Error: {e}")
+    return make_response(jsonify({
+        "status": "error",
+        "error_type": type(e).__name__,
+        "message": str(e)
+    }), 500)
+
+
+def get_chat_session(session_id):
+    """
+    Возвращает объект чата или создает новый.
+    """
+    if session_id not in chat_sessions:
+        model = genai.GenerativeModel(MODEL_NAME)
+        chat_sessions[session_id] = model.start_chat(history=[])
+        print(f"[INFO] Создана новая сессия: {session_id}")
+    return chat_sessions[session_id]
+
+
+# --- Эндпоинты ---
+
+@app.route('/chat', methods=['POST'])
+def chat():
+    if not request.is_json:
+        return jsonify({"status": "error", "message": "Content-Type должен быть application/json"}), 400
+
+    data = request.get_json()
+    user_message = data.get('message')
+    session_id = data.get('session_id')
+
+    if not user_message:
+        return jsonify({"status": "error", "message": "Поле 'message' обязательно"}), 400
+
+    if not session_id:
+        session_id = str(uuid.uuid4())
     try:
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(model_name)
+        chat_session = get_chat_session(session_id)
+        response = chat_session.send_message(user_message)
 
-        # Настройка параметров генерации (опционально)
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.7,
-        )
-
-        response = model.generate_content(
-            prompt_text,
-            generation_config=generation_config
-        )
-
-        return response.text
-
+        return jsonify({
+            "status": "success",
+            "session_id": session_id,
+            "response": response.text
+        })
     except Exception as e:
-        return f"Произошла ошибка при запросе к API: {e}"
+        return jsonify({
+            "status": "error",
+            "message": f"Ошибка при запросе к Gemini API: {str(e)}"
+        }), 500
+
+
+@app.route('/reset', methods=['POST'])
+def reset_context():
+    if not request.is_json:
+        return jsonify({"status": "error", "message": "Content-Type должен быть application/json"}), 400
+
+    data = request.get_json()
+    session_id = data.get('session_id')
+
+    if not session_id:
+        return jsonify({"status": "error", "message": "Поле 'session_id' обязательно для сброса"}), 400
+
+    if session_id in chat_sessions:
+        del chat_sessions[session_id]
+        print(f"[INFO] Сессия сброшена: {session_id}")
+        return jsonify({"status": "success", "message": "Контекст диалога успешно сброшен"})
+    else:
+        return jsonify({"status": "warning", "message": "Сессия не найдена (возможно, уже была удалена)"}), 404
 
 
 if __name__ == "__main__":
-    f = open('task.txt', 'r', encoding='utf-8')
-    data = f.read()
-    f.close()
-    TARGET_MODEL = "gemini-3-pro-preview"
-    user_prompt = """Напиши программу на python которая решает эту задачу. Напомним главное правило написания личных олимпиад: по каждой задаче нужно набрать баллы! Нельзя уйти с контеста с нулем по задаче.
-
-Промоделируем тур олимпиады. Пусть на туре предложено n задач, i-я задача состоит из ki подзадач, j-я подзадача i-й задачи приносит ci,j баллов. Зависимостей между подзадачами нет, поэтому можно в каждой задаче выбрать любое множество подзадач и его решить. При этом нельзя выбрать пустое множество, ведь тогда по задаче будет 0 баллов, а это противоречит главному правилу написания личных олимпиад.
-
-Проверьте, можно ли, придерживаясь главного правила личных олимпиад, набрать на туре ровно s баллов.
-Входные данные
-
-Первая строка содержит два целых числа n, s (1≤n≤100000, 1≤s≤100000) — количество задач в контесте и необходимую сумму баллов, соответственно. Далее следуют описания задач. Описание каждой задачи состоит из двух строк.
-
-Первая строка описания i-й задачи содержит одно целое число ki (1≤ki≤100000) — количество подзадач в i-й задаче.
-
-Вторая строка описания i-й задачи содержит ki целых чисел ci,1,ci,2,…,ci,ki (1≤ci,j≤100000) — баллы за подзадачи.
-
-Гарантируется, что сумма k1+k2+…+kn по всем задачам не превосходит 100000.
-
-Гарантируется, что произведение (k1+k2+…+kn)⋅s не превосходит 107.
-Выходные данные
-
-Если решения не существует, выведите «No».
-
-В противном случае в первой строке выведите «Yes». Далее необходимо вывести описание решенных подзадач для каждой задачи.
-
-Описание i-й задачи начинается с целого числа mi (1≤mi≤ki) — количества решенных подзадач i-й задачи. Далее следуют mi различных целых чисел pi,1,pi,2,…,pi,mi (1≤pi,j≤ki) — номера решенных подзадач в i-й задаче.
-
-Если существует несколько подходящих способов набрать s баллов, выведите любое из них.
-Система оценки
-
-Баллы за каждую подзадачу начисляются только в случае, если все тесты для этой подзадачи и необходимых подзадач успешно пройдены
-|c|c|}
-
-Подзадача
-	Баллы	Дополнительные ограничения 	Необходимые подзадачи 	Информация о проверке
-1	8	n=1	—	первая ошибка
-2	10	n=2	—	первая ошибка
-3	6	k1+k2+…+kn≤20	—	первая ошибка
-4	6	ki=1	—	первая ошибка
-5	15	n⋅s≤100000, s≤1000	3	первая ошибка
-6	55	—	1−5	первая ошибка
-Примеры
-Входные данные
-Скопировать
-
-2 4
-1
-2
-2
-3 1
-
-Выходные данные
-Скопировать
-
-No
-
-Входные данные
-Скопировать
-
-2 4
-1
-2
-2
-2 1
-
-Выходные данные
-Скопировать
-
-Yes
-1
-1 
-1
-1 
-"""
-    result = query_gemini_model(user_prompt, GEMINI_API_KEY, TARGET_MODEL)
-    print("Ответ Gemini:")
-    print(result)
+    print(f"Сервер запущен. Модель: {MODEL_NAME}")
+    app.run(host='0.0.0.0', port=2026, debug=True)
