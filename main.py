@@ -1,160 +1,118 @@
+import google.generativeai as genai
 import os
-import sys
-import base64
-import json
-import httpx # Используем httpx напрямую для контроля протокола
-from PIL import Image
-from io import BytesIO
 
-# Импорт ключа
-try:
-    from config import GEMINI_API_KEY
-except ImportError:
-    print("Ошибка: файл config.py не найден или в нем нет GEMINI_API_KEY")
-    sys.exit(1)
+from config import GEMINI_API_KEY
 
-# === НАСТРОЙКИ ===
-MODEL_NAME = "gemini-3-pro-preview" # Или gemini-2.0-flash-exp
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:streamGenerateContent?key={GEMINI_API_KEY}"
 
-def encode_image(image_path):
-    """Кодирует картинку в base64 для отправки"""
+def query_gemini_model(prompt_text: str, api_key: str, model_name: str = "gemini-1.5-pro-latest") -> str:
+    """
+    Отправляет текстовый запрос к модели Gemini и возвращает ответ.
+
+    Args:
+        prompt_text (str): Текст вашего запроса.
+        api_key (str): Ваш API ключ Google AI.
+        model_name (str): Название модели (например, 'gemini-1.5-pro').
+                          Если выйдет 3 версия, замените на 'gemini-3.0-pro-preview'.
+
+    Returns:
+        str: Текст ответа от нейросети.
+    """
     try:
-        with Image.open(image_path) as img:
-            # Конвертируем в JPEG (если png) и в байты
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
+        genai.configure(api_key=api_key)
+        model = genai.GenerativeModel(model_name)
 
-            buffered = BytesIO()
-            img.save(buffered, format="JPEG")
-            img_bytes = buffered.getvalue()
-            return base64.b64encode(img_bytes).decode('utf-8')
+        # Настройка параметров генерации (опционально)
+        generation_config = genai.types.GenerationConfig(
+            temperature=0.7,
+        )
+
+        response = model.generate_content(
+            prompt_text,
+            generation_config=generation_config
+        )
+
+        return response.text
+
     except Exception as e:
-        print(f"Ошибка обработки изображения: {e}")
-        return None
+        return f"Произошла ошибка при запросе к API: {e}"
 
-def run_chat():
-    print(f"Запуск чата с моделью {MODEL_NAME} (HTTP/2 Force Mode)")
-    print("Команды те же: текст или image-путь/к/файлу.jpg")
-    print("-" * 50)
-
-    # История чата (чтобы нейросеть помнила контекст)
-    chat_history = []
-
-    # Создаем клиент с принудительным HTTP/2 и без тайм-аута
-    # http2=True - это ГЛАВНОЕ лекарство от разрывов связи
-    client = httpx.Client(http2=True, timeout=None)
-
-    while True:
-        try:
-            user_input = input("\nВы: ").strip()
-
-            if user_input.lower() in ['выход', 'exit', 'quit']:
-                print("Завершение работы.")
-                break
-
-            if not user_input:
-                continue
-
-            # Подготовка контента пользователя
-            user_parts = []
-
-            # --- БЛОК ОБРАБОТКИ ИЗОБРАЖЕНИЙ ---
-            if user_input.startswith("image-"):
-                image_path = user_input[6:].strip()
-                if os.path.exists(image_path):
-                    b64_image = encode_image(image_path)
-                    if b64_image:
-                        # Добавляем картинку
-                        user_parts.append({
-                            "inline_data": {
-                                "mime_type": "image/jpeg",
-                                "data": b64_image
-                            }
-                        })
-
-                        caption = input("Текст к изображению: ").strip()
-                        if caption:
-                            user_parts.append({"text": caption})
-                        print(f"Изображение {image_path} прикреплено.")
-                    else:
-                        continue
-                else:
-                    print(f"Файл не найден: {image_path}")
-                    continue
-            else:
-                # Просто текст
-                user_parts.append({"text": user_input})
-            # ----------------------------------
-
-            # Формируем тело запроса с учетом истории
-            # Добавляем текущее сообщение в историю (пока локально)
-            current_message = {"role": "user", "parts": user_parts}
-            request_contents = chat_history + [current_message]
-
-            payload = {
-                "contents": request_contents
-            }
-
-            print("Gemini думает (HTTP/2)...", end="\r")
-
-            full_response_text = ""
-
-            # Отправляем запрос вручную
-            # stream=True позволяет читать ответ по кусочкам
-            try:
-                with client.stream("POST", API_URL, json=payload, headers={"Content-Type": "application/json"}) as response:
-
-                    # Проверяем, не вернул ли сервер ошибку сразу (например 404 или 400)
-                    if response.status_code != 200:
-                        print(f"\nОшибка сервера: {response.status_code}")
-                        print(response.read().decode())
-                        continue
-
-                    print(" " * 30, end="\r") # Чистим строку статуса
-
-                    # Читаем SSE (Server-Sent Events)
-                    for line in response.iter_lines():
-                        if not line: continue
-
-                        # Формат SSE приходит как "data: {...json...}"
-                        decoded_line = line.decode('utf-8').strip()
-                        if decoded_line.startswith("data:"):
-                            json_str = decoded_line[5:].strip() # Убираем "data: "
-                            try:
-                                chunk_data = json.loads(json_str)
-                                # Извлекаем текст из кандидата
-                                candidates = chunk_data.get("candidates", [])
-                                if candidates:
-                                    parts = candidates[0].get("content", {}).get("parts", [])
-                                    for part in parts:
-                                        text_chunk = part.get("text", "")
-                                        if text_chunk:
-                                            print(text_chunk, end="", flush=True)
-                                            full_response_text += text_chunk
-                            except json.JSONDecodeError:
-                                pass
-
-                print() # Перенос строки в конце
-
-                # Если ответ получен, сохраняем пару (вопрос-ответ) в историю
-                if full_response_text:
-                    chat_history.append(current_message)
-                    chat_history.append({
-                        "role": "model",
-                        "parts": [{"text": full_response_text}]
-                    })
-
-            except httpx.RemoteProtocolError:
-                print("\n[Сбой] Сервер разорвал соединение, но HTTP/2 должен был помочь.")
-            except Exception as e:
-                print(f"\nОшибка сети: {e}")
-
-        except KeyboardInterrupt:
-            print("\nВыход.")
-            break
-        except Exception as global_e:
-            print(f"\nКритическая ошибка: {global_e}")
 
 if __name__ == "__main__":
-    run_chat()
+    f = open('task.txt', 'r', encoding='utf-8')
+    data = f.read()
+    f.close()
+    TARGET_MODEL = "gemini-3-pro-preview"
+    user_prompt = """Напиши программу на python которая решает эту задачу. Напомним главное правило написания личных олимпиад: по каждой задаче нужно набрать баллы! Нельзя уйти с контеста с нулем по задаче.
+
+Промоделируем тур олимпиады. Пусть на туре предложено n задач, i-я задача состоит из ki подзадач, j-я подзадача i-й задачи приносит ci,j баллов. Зависимостей между подзадачами нет, поэтому можно в каждой задаче выбрать любое множество подзадач и его решить. При этом нельзя выбрать пустое множество, ведь тогда по задаче будет 0 баллов, а это противоречит главному правилу написания личных олимпиад.
+
+Проверьте, можно ли, придерживаясь главного правила личных олимпиад, набрать на туре ровно s баллов.
+Входные данные
+
+Первая строка содержит два целых числа n, s (1≤n≤100000, 1≤s≤100000) — количество задач в контесте и необходимую сумму баллов, соответственно. Далее следуют описания задач. Описание каждой задачи состоит из двух строк.
+
+Первая строка описания i-й задачи содержит одно целое число ki (1≤ki≤100000) — количество подзадач в i-й задаче.
+
+Вторая строка описания i-й задачи содержит ki целых чисел ci,1,ci,2,…,ci,ki (1≤ci,j≤100000) — баллы за подзадачи.
+
+Гарантируется, что сумма k1+k2+…+kn по всем задачам не превосходит 100000.
+
+Гарантируется, что произведение (k1+k2+…+kn)⋅s не превосходит 107.
+Выходные данные
+
+Если решения не существует, выведите «No».
+
+В противном случае в первой строке выведите «Yes». Далее необходимо вывести описание решенных подзадач для каждой задачи.
+
+Описание i-й задачи начинается с целого числа mi (1≤mi≤ki) — количества решенных подзадач i-й задачи. Далее следуют mi различных целых чисел pi,1,pi,2,…,pi,mi (1≤pi,j≤ki) — номера решенных подзадач в i-й задаче.
+
+Если существует несколько подходящих способов набрать s баллов, выведите любое из них.
+Система оценки
+
+Баллы за каждую подзадачу начисляются только в случае, если все тесты для этой подзадачи и необходимых подзадач успешно пройдены
+|c|c|}
+
+Подзадача
+	Баллы	Дополнительные ограничения 	Необходимые подзадачи 	Информация о проверке
+1	8	n=1	—	первая ошибка
+2	10	n=2	—	первая ошибка
+3	6	k1+k2+…+kn≤20	—	первая ошибка
+4	6	ki=1	—	первая ошибка
+5	15	n⋅s≤100000, s≤1000	3	первая ошибка
+6	55	—	1−5	первая ошибка
+Примеры
+Входные данные
+Скопировать
+
+2 4
+1
+2
+2
+3 1
+
+Выходные данные
+Скопировать
+
+No
+
+Входные данные
+Скопировать
+
+2 4
+1
+2
+2
+2 1
+
+Выходные данные
+Скопировать
+
+Yes
+1
+1 
+1
+1 
+"""
+    result = query_gemini_model(user_prompt, GEMINI_API_KEY, TARGET_MODEL)
+    print("Ответ Gemini:")
+    print(result)
