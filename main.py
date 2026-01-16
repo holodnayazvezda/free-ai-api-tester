@@ -1,115 +1,84 @@
-import random
+from google import genai
+from PIL import Image  # Импортируем библиотеку для работы с картинками
+import sys
+import os
 
-AIML_KEYS = [
-    "REMOVED_SECRET",
-    "REMOVED_SECRET",
-    "REMOVED_SECRET",
-    "REMOVED_SECRET",
-    "REMOVED_SECRET"
-]
+from google.genai import types
 
-def get_random_key():
-    return random.choice(AIML_KEYS)
+# Импорт ключа из вашего файла config.py
+try:
+    from config import GEMINI_API_KEY
+except ImportError:
+    print("Ошибка: файл config.py не найден или в нем нет GEMINI_API_KEY")
+    sys.exit(1)
 
-def encode_image_to_base64(image_path):
-    import base64
-    with open(image_path, "rb") as image_file:
-        return base64.b64encode(image_file.read()).decode("utf-8")
+def run_chat():
+    try:
+        client = genai.Client(api_key=GEMINI_API_KEY,  http_options=types.HttpOptions(timeout=300000) )
+        # Обратите внимание: убедитесь, что модель "gemini-3-flash-preview" доступна.
+        # Если будет ошибка 404, попробуйте "gemini-2.0-flash-exp" или "gemini-1.5-flash"
+        chat = client.chats.create(model="gemini-3-flash-preview")
+    except Exception as e:
+        print(f"Ошибка инициализации: {e}")
+        return
 
-def ask_aimlapi():
-    from openai import OpenAI
-    import requests
-
-    client = OpenAI(
-        api_key=get_random_key(),
-        base_url="https://api.aimlapi.com/v1",
-    )
-
-    model = "gpt-4o"
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Ты отличный помощник по олимпиадному программированию. "
-                "Ты получаешь условие задачи и даёшь максимально оптимальное решение на Python. "
-                "Отдавай полный код."
-            )
-        }
-    ]
+    print("Чат с Gemini запущен!")
+    print("Команды:")
+    print(" - Просто текст: обычное общение")
+    print(" - image-путь/к/файлу.jpg: отправить картинку")
+    print(" - выход: завершить")
+    print("-" * 50)
 
     while True:
-        users_request = input("> ")
-        if users_request == "exit":
-            break
+        try:
+            user_input = input("\nВы: ").strip()
 
-        if "img" in users_request:
-            try:
-                filename, caption = users_request.split("-")[1:]
-                base64_data = encode_image_to_base64(filename)
+            if user_input.lower() in ['выход', 'exit', 'quit']:
+                print("Завершение работы.")
+                break
 
-                api_key = get_random_key()
+            if not user_input:
+                continue
 
-                url = "https://api.aimlapi.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
+            message_payload = user_input # По умолчанию отправляем просто текст
 
-                payload = {
-                    "model": "gpt-4o",
-                    "messages": [
-                        *messages,
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": caption},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {
-                                        "url": f"data:image/jpeg;base64,{base64_data}"
-                                    }
-                                }
-                            ]
-                        }
-                    ]
-                }
+            # --- БЛОК ОБРАБОТКИ ИЗОБРАЖЕНИЙ ---
+            if user_input.startswith("image-"):
+                image_path = user_input[6:].strip() # Убираем "image-"
 
-                response = requests.post(url, headers=headers, json=payload)
-                r = response.json()
-                response_text = r["choices"][0]["message"]["content"]
-                print(response_text)
+                if os.path.exists(image_path):
+                    try:
+                        # 1. Загружаем изображение через Pillow
+                        img = Image.open(image_path)
 
-                messages.append({"role": "assistant", "content": response_text})
+                        # 2. Спрашиваем у пользователя промпт к картинке
+                        caption = input("Текст к изображению (нажмите Enter, чтобы отправить без текста): ").strip()
 
-            except Exception as e:
-                print("Image error:", e)
+                        # 3. Формируем список для отправки: [Картинка, Текст]
+                        # Если текста нет, отправляем просто [Картинка]
+                        message_payload = [img, caption] if caption else [img]
 
-        else:
-            try:
-                if users_request == "f":
-                    with open("data.txt", "r") as f:
-                        users_request = f.read()
+                        print(f"Загружено изображение: {image_path}")
+                    except Exception as img_err:
+                        print(f"Ошибка чтения файла изображения: {img_err}")
+                        continue
+                else:
+                    print(f"Файл не найден: {image_path}")
+                    continue
+            # ----------------------------------
 
-                messages.append({"role": "user", "content": users_request})
+            print("Gemini думает...", end="\r")
 
-                client = OpenAI(
-                    api_key=get_random_key(),
-                    base_url="https://api.aimlapi.com/v1",
-                )
+            # Отправка (принимает либо строку, либо список [img, str])
+            response = chat.send_message(message=message_payload)
 
-                completion = client.chat.completions.create(
-                    model=model,
-                    messages=messages,
-                )
+            # Очистка индикатора
+            print(" " * 20, end="\r")
 
-                response_text = completion.choices[0].message.content
-                print(response_text)
+            print(f"Gemini: {response.text}")
 
-                if response_text:
-                    messages.append({"role": "assistant", "content": response_text})
+        except ImportError as e:
+            print(f"\nПроизошла ошибка API: {e}")
 
-            except Exception as e:
-                print("Error:", e)
-
-ask_aimlapi()
+if __name__ == "__main__":
+    run_chat()
