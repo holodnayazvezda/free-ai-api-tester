@@ -1,33 +1,49 @@
-from google import genai
-from PIL import Image  # Импортируем библиотеку для работы с картинками
-import sys
 import os
+import sys
+import base64
+import json
+import httpx # Используем httpx напрямую для контроля протокола
+from PIL import Image
+from io import BytesIO
 
-from google.genai import types
-
-# Импорт ключа из вашего файла config.py
+# Импорт ключа
 try:
     from config import GEMINI_API_KEY
 except ImportError:
     print("Ошибка: файл config.py не найден или в нем нет GEMINI_API_KEY")
     sys.exit(1)
 
-def run_chat():
-    try:
-        client = genai.Client(api_key=GEMINI_API_KEY,  http_options=types.HttpOptions(timeout=300000) )
-        # Обратите внимание: убедитесь, что модель "gemini-3-flash-preview" доступна.
-        # Если будет ошибка 404, попробуйте "gemini-2.0-flash-exp" или "gemini-1.5-flash"
-        chat = client.chats.create(model="gemini-3-flash-preview")
-    except Exception as e:
-        print(f"Ошибка инициализации: {e}")
-        return
+# === НАСТРОЙКИ ===
+MODEL_NAME = "gemini-3-pro-preview" # Или gemini-2.0-flash-exp
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:streamGenerateContent?key={GEMINI_API_KEY}"
 
-    print("Чат с Gemini запущен!")
-    print("Команды:")
-    print(" - Просто текст: обычное общение")
-    print(" - image-путь/к/файлу.jpg: отправить картинку")
-    print(" - выход: завершить")
+def encode_image(image_path):
+    """Кодирует картинку в base64 для отправки"""
+    try:
+        with Image.open(image_path) as img:
+            # Конвертируем в JPEG (если png) и в байты
+            if img.mode in ('RGBA', 'P'):
+                img = img.convert('RGB')
+
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG")
+            img_bytes = buffered.getvalue()
+            return base64.b64encode(img_bytes).decode('utf-8')
+    except Exception as e:
+        print(f"Ошибка обработки изображения: {e}")
+        return None
+
+def run_chat():
+    print(f"Запуск чата с моделью {MODEL_NAME} (HTTP/2 Force Mode)")
+    print("Команды те же: текст или image-путь/к/файлу.jpg")
     print("-" * 50)
+
+    # История чата (чтобы нейросеть помнила контекст)
+    chat_history = []
+
+    # Создаем клиент с принудительным HTTP/2 и без тайм-аута
+    # http2=True - это ГЛАВНОЕ лекарство от разрывов связи
+    client = httpx.Client(http2=True, timeout=None)
 
     while True:
         try:
@@ -40,45 +56,105 @@ def run_chat():
             if not user_input:
                 continue
 
-            message_payload = user_input # По умолчанию отправляем просто текст
+            # Подготовка контента пользователя
+            user_parts = []
 
             # --- БЛОК ОБРАБОТКИ ИЗОБРАЖЕНИЙ ---
             if user_input.startswith("image-"):
-                image_path = user_input[6:].strip() # Убираем "image-"
-
+                image_path = user_input[6:].strip()
                 if os.path.exists(image_path):
-                    try:
-                        # 1. Загружаем изображение через Pillow
-                        img = Image.open(image_path)
+                    b64_image = encode_image(image_path)
+                    if b64_image:
+                        # Добавляем картинку
+                        user_parts.append({
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": b64_image
+                            }
+                        })
 
-                        # 2. Спрашиваем у пользователя промпт к картинке
-                        caption = input("Текст к изображению (нажмите Enter, чтобы отправить без текста): ").strip()
-
-                        # 3. Формируем список для отправки: [Картинка, Текст]
-                        # Если текста нет, отправляем просто [Картинка]
-                        message_payload = [img, caption] if caption else [img]
-
-                        print(f"Загружено изображение: {image_path}")
-                    except Exception as img_err:
-                        print(f"Ошибка чтения файла изображения: {img_err}")
+                        caption = input("Текст к изображению: ").strip()
+                        if caption:
+                            user_parts.append({"text": caption})
+                        print(f"Изображение {image_path} прикреплено.")
+                    else:
                         continue
                 else:
                     print(f"Файл не найден: {image_path}")
                     continue
+            else:
+                # Просто текст
+                user_parts.append({"text": user_input})
             # ----------------------------------
 
-            print("Gemini думает...", end="\r")
+            # Формируем тело запроса с учетом истории
+            # Добавляем текущее сообщение в историю (пока локально)
+            current_message = {"role": "user", "parts": user_parts}
+            request_contents = chat_history + [current_message]
 
-            # Отправка (принимает либо строку, либо список [img, str])
-            response = chat.send_message(message=message_payload)
+            payload = {
+                "contents": request_contents
+            }
 
-            # Очистка индикатора
-            print(" " * 20, end="\r")
+            print("Gemini думает (HTTP/2)...", end="\r")
 
-            print(f"Gemini: {response.text}")
+            full_response_text = ""
 
-        except ImportError as e:
-            print(f"\nПроизошла ошибка API: {e}")
+            # Отправляем запрос вручную
+            # stream=True позволяет читать ответ по кусочкам
+            try:
+                with client.stream("POST", API_URL, json=payload, headers={"Content-Type": "application/json"}) as response:
+
+                    # Проверяем, не вернул ли сервер ошибку сразу (например 404 или 400)
+                    if response.status_code != 200:
+                        print(f"\nОшибка сервера: {response.status_code}")
+                        print(response.read().decode())
+                        continue
+
+                    print(" " * 30, end="\r") # Чистим строку статуса
+
+                    # Читаем SSE (Server-Sent Events)
+                    for line in response.iter_lines():
+                        if not line: continue
+
+                        # Формат SSE приходит как "data: {...json...}"
+                        decoded_line = line.decode('utf-8').strip()
+                        if decoded_line.startswith("data:"):
+                            json_str = decoded_line[5:].strip() # Убираем "data: "
+                            try:
+                                chunk_data = json.loads(json_str)
+                                # Извлекаем текст из кандидата
+                                candidates = chunk_data.get("candidates", [])
+                                if candidates:
+                                    parts = candidates[0].get("content", {}).get("parts", [])
+                                    for part in parts:
+                                        text_chunk = part.get("text", "")
+                                        if text_chunk:
+                                            print(text_chunk, end="", flush=True)
+                                            full_response_text += text_chunk
+                            except json.JSONDecodeError:
+                                pass
+
+                print() # Перенос строки в конце
+
+                # Если ответ получен, сохраняем пару (вопрос-ответ) в историю
+                if full_response_text:
+                    chat_history.append(current_message)
+                    chat_history.append({
+                        "role": "model",
+                        "parts": [{"text": full_response_text}]
+                    })
+
+            except httpx.RemoteProtocolError:
+                print("\n[Сбой] Сервер разорвал соединение, но HTTP/2 должен был помочь.")
+            except Exception as e:
+                print(f"\nОшибка сети: {e}")
+
+        except KeyboardInterrupt:
+            print("\nВыход.")
+            break
+        except Exception as global_e:
+            print(f"\nКритическая ошибка: {global_e}")
 
 if __name__ == "__main__":
     run_chat()
