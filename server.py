@@ -8,7 +8,7 @@ from config import GEMINI_API_KEY
 
 app = Flask(__name__)
 genai.configure(api_key=GEMINI_API_KEY)
-MODEL_NAME = "gemini-3-pro-preview"
+MODEL_NAME = "gemini-3.1-pro-preview"
 
 chat_sessions = {}
 
